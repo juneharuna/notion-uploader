@@ -77,10 +77,11 @@ async function createFileUpload(
 async function sendFileData(
   uploadId: string,
   file: Buffer,
+  contentType: string,
   partNumber?: number
 ): Promise<FileUploadResponse> {
   const formData = new FormData();
-  formData.append("file", new Blob([new Uint8Array(file)]));
+  formData.append("file", new Blob([new Uint8Array(file)], { type: contentType }));
 
   const url = partNumber
     ? `${NOTION_API_BASE}/file_uploads/${uploadId}/send?part_number=${partNumber}`
@@ -197,7 +198,7 @@ export async function uploadFileToNotion(
       const end = Math.min(start + CHUNK_SIZE, fileSize);
       const chunk = fileBuffer.subarray(start, end);
 
-      await sendFileData(uploadObj.id, chunk, i + 1);
+      await sendFileData(uploadObj.id, chunk, contentType, i + 1);
 
       const progress = 5 + ((i + 1) / numberOfParts) * 80;
       onProgress?.({
@@ -222,7 +223,7 @@ export async function uploadFileToNotion(
     const uploadObj = await createFileUpload(filename, contentType, fileSize);
 
     onProgress?.({ phase: "uploading", progress: 20 });
-    await sendFileData(uploadObj.id, fileBuffer);
+    await sendFileData(uploadObj.id, fileBuffer, contentType);
 
     onProgress?.({ phase: "attaching", progress: 80 });
     await attachFileToPage(uploadObj.id, filename);
