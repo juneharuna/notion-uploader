@@ -10,10 +10,12 @@ import {
   Paper,
   Progress,
   Badge,
-  ActionIcon,
   ThemeIcon,
 } from "@mantine/core";
 import { formatFileSize } from "@/lib/notion";
+
+// 4MB chunk size to stay under Vercel's 4.5MB limit (free tier)
+const CHUNK_SIZE = 4 * 1024 * 1024;
 
 interface FileWithProgress {
   file: FileWithPath;
@@ -23,18 +25,120 @@ interface FileWithProgress {
   error?: string;
 }
 
-interface UploadProgressData {
-  phase?: string;
-  progress?: number;
-  chunkIndex?: number;
-  totalChunks?: number;
-  error?: string;
-}
-
 export default function FileDropzone() {
   const [files, setFiles] = useState<FileWithProgress[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const openRef = useRef<() => void>(null);
+
+  const uploadFileWithChunking = async (
+    file: FileWithPath,
+    fileIndex: number
+  ) => {
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const contentType = file.type || "application/octet-stream";
+
+    // Update phase
+    const updateProgress = (progress: number, phase: string) => {
+      setFiles((prev) =>
+        prev.map((f, idx) =>
+          idx === fileIndex ? { ...f, progress, phase } : f
+        )
+      );
+    };
+
+    try {
+      // 1. Initialize upload
+      updateProgress(0, "업로드 준비 중...");
+
+      const initRes = await fetch("/api/upload/init", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: file.name,
+          contentType,
+          totalChunks,
+        }),
+      });
+
+      if (!initRes.ok) {
+        const errorData = await initRes.json();
+        throw new Error(errorData.error || "업로드 초기화 실패");
+      }
+
+      const { uploadId } = await initRes.json();
+
+      // 2. Upload chunks
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
+
+        const formData = new FormData();
+        formData.append("chunk", chunk);
+        formData.append("uploadId", uploadId);
+        formData.append("partNumber", String(i + 1));
+        formData.append("contentType", contentType);
+
+        const chunkPhase =
+          totalChunks > 1
+            ? `업로드 중 (${i + 1}/${totalChunks})`
+            : "업로드 중...";
+
+        // Progress: 5% for init, 85% for chunks, 10% for completion
+        const chunkProgress = 5 + ((i + 1) / totalChunks) * 85;
+        updateProgress(chunkProgress, chunkPhase);
+
+        const chunkRes = await fetch("/api/upload/chunk", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!chunkRes.ok) {
+          const errorData = await chunkRes.json();
+          throw new Error(errorData.error || `청크 ${i + 1} 업로드 실패`);
+        }
+      }
+
+      // 3. Complete upload
+      updateProgress(92, "Notion에 첨부 중...");
+
+      const completeRes = await fetch("/api/upload/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          uploadId,
+          filename: file.name,
+          totalChunks,
+        }),
+      });
+
+      if (!completeRes.ok) {
+        const errorData = await completeRes.json();
+        throw new Error(errorData.error || "업로드 완료 처리 실패");
+      }
+
+      // Success
+      setFiles((prev) =>
+        prev.map((f, idx) =>
+          idx === fileIndex
+            ? { ...f, status: "completed", progress: 100, phase: "완료!" }
+            : f
+        )
+      );
+    } catch (error) {
+      setFiles((prev) =>
+        prev.map((f, idx) =>
+          idx === fileIndex
+            ? {
+                ...f,
+                status: "error",
+                error: error instanceof Error ? error.message : "업로드 실패",
+              }
+            : f
+        )
+      );
+    }
+  };
 
   const handleDrop = async (acceptedFiles: FileWithPath[]) => {
     const newFiles: FileWithProgress[] = acceptedFiles.map((file) => ({
@@ -46,127 +150,21 @@ export default function FileDropzone() {
     setFiles((prev) => [...prev, ...newFiles]);
     setIsUploading(true);
 
+    const startIndex = files.length;
+
     for (let i = 0; i < newFiles.length; i++) {
-      const fileWithProgress = newFiles[i];
-      const fileIndex = files.length + i;
+      const fileIndex = startIndex + i;
 
-      try {
-        setFiles((prev) =>
-          prev.map((f, idx) =>
-            idx === fileIndex ? { ...f, status: "uploading" as const } : f
-          )
-        );
+      setFiles((prev) =>
+        prev.map((f, idx) =>
+          idx === fileIndex ? { ...f, status: "uploading" } : f
+        )
+      );
 
-        const formData = new FormData();
-        formData.append("file", fileWithProgress.file);
-
-        const response = await fetch("/api/upload", {
-          method: "POST",
-          body: formData,
-        });
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.error || "Upload failed");
-        }
-
-        // Use SSE for progress updates
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
-
-        if (reader) {
-          let buffer = "";
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                try {
-                  const data: UploadProgressData = JSON.parse(line.slice(6));
-
-                  // Check for error in SSE stream
-                  if (data.error) {
-                    throw new Error(data.error);
-                  }
-
-                  setFiles((prev) =>
-                    prev.map((f, idx) =>
-                      idx === fileIndex
-                        ? {
-                            ...f,
-                            progress: data.progress || 0,
-                            phase: getPhaseText(
-                              data.phase || "",
-                              data.chunkIndex,
-                              data.totalChunks
-                            ),
-                          }
-                        : f
-                    )
-                  );
-                } catch (parseError) {
-                  if (parseError instanceof Error && parseError.message !== "Unexpected token") {
-                    throw parseError;
-                  }
-                }
-              }
-            }
-          }
-        }
-
-        setFiles((prev) =>
-          prev.map((f, idx) =>
-            idx === fileIndex
-              ? { ...f, status: "completed" as const, progress: 100 }
-              : f
-          )
-        );
-      } catch (error) {
-        setFiles((prev) =>
-          prev.map((f, idx) =>
-            idx === fileIndex
-              ? {
-                  ...f,
-                  status: "error" as const,
-                  error:
-                    error instanceof Error ? error.message : "Upload failed",
-                }
-              : f
-          )
-        );
-      }
+      await uploadFileWithChunking(newFiles[i].file, fileIndex);
     }
 
     setIsUploading(false);
-  };
-
-  const getPhaseText = (
-    phase: string,
-    chunkIndex?: number,
-    totalChunks?: number
-  ): string => {
-    switch (phase) {
-      case "creating":
-        return "업로드 준비 중...";
-      case "uploading":
-        if (chunkIndex && totalChunks) {
-          return `업로드 중 (${chunkIndex}/${totalChunks})`;
-        }
-        return "업로드 중...";
-      case "completing":
-        return "업로드 완료 처리 중...";
-      case "attaching":
-        return "Notion에 첨부 중...";
-      case "done":
-        return "완료!";
-      default:
-        return "처리 중...";
-    }
   };
 
   const getStatusColor = (status: string) => {

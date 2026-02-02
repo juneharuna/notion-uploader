@@ -1,8 +1,6 @@
-const NOTION_API_KEY = process.env.NOTION_API_KEY!;
-const NOTION_PAGE_ID = process.env.NOTION_PAGE_ID!;
 const NOTION_API_BASE = "https://api.notion.com/v1";
 
-interface FileUploadResponse {
+export interface FileUploadResponse {
   id: string;
   status: string;
   file_url?: {
@@ -11,38 +9,48 @@ interface FileUploadResponse {
   };
 }
 
-interface UploadProgress {
+export interface UploadProgress {
   phase: "creating" | "uploading" | "completing" | "attaching" | "done";
   progress: number;
   chunkIndex?: number;
   totalChunks?: number;
 }
 
-type ProgressCallback = (progress: UploadProgress) => void;
+export type ProgressCallback = (progress: UploadProgress) => void;
 
-const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB per chunk
+const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB per chunk (Notion API limit)
 const MAX_SINGLE_UPLOAD_SIZE = 20 * 1024 * 1024; // 20MB
+
+function getNotionApiKey(): string {
+  const key = process.env.NOTION_API_KEY;
+  if (!key) throw new Error("NOTION_API_KEY is not configured");
+  return key;
+}
+
+function getNotionPageId(): string {
+  const id = process.env.NOTION_PAGE_ID;
+  if (!id) throw new Error("NOTION_PAGE_ID is not configured");
+  return id;
+}
 
 function getHeaders() {
   return {
-    Authorization: `Bearer ${NOTION_API_KEY}`,
+    Authorization: `Bearer ${getNotionApiKey()}`,
     "Notion-Version": "2022-06-28",
-    // Note: file_uploads API requires newer version, but blocks API needs older version
   };
 }
 
 function getFileUploadHeaders() {
   return {
-    Authorization: `Bearer ${NOTION_API_KEY}`,
+    Authorization: `Bearer ${getNotionApiKey()}`,
     "Notion-Version": "2025-09-03",
   };
 }
 
 // Create file upload object
-async function createFileUpload(
+export async function createFileUpload(
   filename: string,
   contentType: string,
-  fileSize: number,
   multiPart: boolean = false,
   numberOfParts?: number
 ): Promise<FileUploadResponse> {
@@ -73,8 +81,8 @@ async function createFileUpload(
   return response.json();
 }
 
-// Send file data (single or part)
-async function sendFileData(
+// Send file data (single or part) - accepts Buffer for server-side use
+export async function sendFileData(
   uploadId: string,
   file: Buffer,
   contentType: string,
@@ -102,7 +110,7 @@ async function sendFileData(
 }
 
 // Complete multi-part upload
-async function completeMultiPartUpload(
+export async function completeMultiPartUpload(
   uploadId: string
 ): Promise<FileUploadResponse> {
   const response = await fetch(
@@ -122,13 +130,14 @@ async function completeMultiPartUpload(
 }
 
 // Attach file to Notion page
-async function attachFileToPage(
+export async function attachFileToPage(
   fileUploadId: string,
   filename: string,
-  pageId: string = NOTION_PAGE_ID
+  pageId?: string
 ): Promise<void> {
+  const targetPageId = pageId || getNotionPageId();
   const response = await fetch(
-    `${NOTION_API_BASE}/blocks/${pageId}/children`,
+    `${NOTION_API_BASE}/blocks/${targetPageId}/children`,
     {
       method: "PATCH",
       headers: {
@@ -166,7 +175,7 @@ async function attachFileToPage(
   }
 }
 
-// Main upload function
+// Main upload function (for small files under Vercel limit - kept for backward compatibility)
 export async function uploadFileToNotion(
   filename: string,
   contentType: string,
@@ -185,7 +194,6 @@ export async function uploadFileToNotion(
     const uploadObj = await createFileUpload(
       filename,
       contentType,
-      fileSize,
       true,
       numberOfParts
     );
@@ -220,7 +228,7 @@ export async function uploadFileToNotion(
     return { success: true, fileUploadId: uploadObj.id };
   } else {
     // Single upload for files <= 20MB
-    const uploadObj = await createFileUpload(filename, contentType, fileSize);
+    const uploadObj = await createFileUpload(filename, contentType);
 
     onProgress?.({ phase: "uploading", progress: 20 });
     await sendFileData(uploadObj.id, fileBuffer, contentType);
