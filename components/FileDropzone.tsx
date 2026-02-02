@@ -30,12 +30,25 @@ export default function FileDropzone() {
   const [isUploading, setIsUploading] = useState(false);
   const openRef = useRef<() => void>(null);
 
+  const cleanupUpload = async (uploadId: string) => {
+    try {
+      await fetch("/api/upload/cleanup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uploadId }),
+      });
+    } catch (e) {
+      console.error("Cleanup failed:", e);
+    }
+  };
+
   const uploadFileWithChunking = async (
     file: FileWithPath,
     fileIndex: number
   ) => {
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     const contentType = file.type || "application/octet-stream";
+    let uploadId: string | null = null;
 
     // Update phase
     const updateProgress = (progress: number, phase: string) => {
@@ -66,9 +79,11 @@ export default function FileDropzone() {
         throw new Error(errorData.error || "업로드 초기화 실패");
       }
 
-      const { uploadId, useMultiPart } = await initRes.json();
+      const initData = await initRes.json();
+      uploadId = initData.uploadId;
+      const useMultiPart = initData.useMultiPart;
 
-      // 2. Upload chunks (for multi-part) or just track progress (for single-part)
+      // 2. Upload chunks to Vercel Blob
       for (let i = 0; i < totalChunks; i++) {
         const start = i * CHUNK_SIZE;
         const end = Math.min(start + CHUNK_SIZE, file.size);
@@ -76,10 +91,8 @@ export default function FileDropzone() {
 
         const formData = new FormData();
         formData.append("chunk", chunk);
-        formData.append("uploadId", uploadId);
+        formData.append("uploadId", uploadId!);
         formData.append("partNumber", String(i + 1));
-        formData.append("contentType", contentType);
-        formData.append("useMultiPart", String(useMultiPart));
 
         const chunkPhase =
           totalChunks > 1
@@ -101,15 +114,15 @@ export default function FileDropzone() {
         }
       }
 
-      // 3. Complete upload
+      // 3. Complete upload (combines chunks and sends to Notion)
       updateProgress(92, "Notion에 첨부 중...");
 
       const completeFormData = new FormData();
-      completeFormData.append("uploadId", uploadId);
+      completeFormData.append("uploadId", uploadId!);
       completeFormData.append("filename", file.name);
       completeFormData.append("contentType", contentType);
-      completeFormData.append("useMultiPart", String(useMultiPart));
       completeFormData.append("totalChunks", String(totalChunks));
+      completeFormData.append("useMultiPart", String(useMultiPart));
 
       const completeRes = await fetch("/api/upload/complete", {
         method: "POST",
@@ -130,6 +143,11 @@ export default function FileDropzone() {
         )
       );
     } catch (error) {
+      // Cleanup Vercel Blob chunks on error
+      if (uploadId) {
+        await cleanupUpload(uploadId);
+      }
+
       setFiles((prev) =>
         prev.map((f, idx) =>
           idx === fileIndex

@@ -91,9 +91,12 @@ export async function sendFileData(
   const formData = new FormData();
   formData.append("file", new Blob([new Uint8Array(file)], { type: contentType }));
 
-  const url = partNumber
-    ? `${NOTION_API_BASE}/file_uploads/${uploadId}/send?part_number=${partNumber}`
-    : `${NOTION_API_BASE}/file_uploads/${uploadId}/send`;
+  // part_number must be in the request body, not query parameter
+  if (partNumber) {
+    formData.append("part_number", String(partNumber));
+  }
+
+  const url = `${NOTION_API_BASE}/file_uploads/${uploadId}/send`;
 
   const response = await fetch(url, {
     method: "POST",

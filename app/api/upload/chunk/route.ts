@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { put } from "@vercel/blob";
 import { verifyAuthToken, isPasswordEnabled } from "../../auth/route";
-import { sendFileData } from "@/lib/notion";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -30,8 +29,6 @@ export async function POST(request: NextRequest) {
     const chunk = formData.get("chunk") as File;
     const uploadId = formData.get("uploadId") as string;
     const partNumber = formData.get("partNumber") as string;
-    const contentType = formData.get("contentType") as string;
-    const useMultiPart = formData.get("useMultiPart") === "true";
 
     if (!chunk || !uploadId || !partNumber) {
       return NextResponse.json(
@@ -44,28 +41,18 @@ export async function POST(request: NextRequest) {
     const buffer = Buffer.from(arrayBuffer);
     const partNum = parseInt(partNumber, 10);
 
-    if (useMultiPart) {
-      // For multi-part uploads (files > 20MB), send directly to Notion
-      await sendFileData(
-        uploadId,
-        buffer,
-        contentType || "application/octet-stream",
-        partNum
-      );
-    } else {
-      // For single-part uploads, save chunk to Vercel Blob
-      const blobPath = `chunks/${uploadId}/${partNum}`;
-      await put(blobPath, buffer, {
-        access: "public",
-        addRandomSuffix: false,
-      });
-    }
+    // Save all chunks to Vercel Blob (regardless of file size)
+    // Complete route will handle combining and sending to Notion
+    const blobPath = `chunks/${uploadId}/${partNum}`;
+    await put(blobPath, buffer, {
+      access: "public",
+      addRandomSuffix: false,
+    });
 
     return NextResponse.json({
       success: true,
       uploadId,
       partNumber: partNum,
-      useMultiPart,
     });
   } catch (error) {
     console.error("Chunk upload error:", error);

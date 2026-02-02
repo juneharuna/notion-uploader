@@ -2,10 +2,28 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { list, del } from "@vercel/blob";
 import { verifyAuthToken, isPasswordEnabled } from "../../auth/route";
-import { completeMultiPartUpload, attachFileToPage, sendFileData } from "@/lib/notion";
+import {
+  completeMultiPartUpload,
+  attachFileToPage,
+  sendFileData,
+} from "@/lib/notion";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 800; // Pro plan maximum
+
+const NOTION_CHUNK_SIZE = 10 * 1024 * 1024; // 10MB (Notion multi-part chunk size)
+
+async function cleanupBlobChunks(uploadId: string): Promise<void> {
+  try {
+    const { blobs } = await list({ prefix: `chunks/${uploadId}/` });
+    if (blobs.length > 0) {
+      await del(blobs.map((b) => b.url));
+    }
+  } catch (error) {
+    console.error("Cleanup error:", error);
+    // Don't throw - cleanup failure shouldn't fail the entire operation
+  }
+}
 
 export async function POST(request: NextRequest) {
   // Check authentication
@@ -25,13 +43,16 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  let uploadId: string | null = null;
+
   try {
     const formData = await request.formData();
-    const uploadId = formData.get("uploadId") as string;
+    uploadId = formData.get("uploadId") as string;
     const filename = formData.get("filename") as string;
     const contentType = formData.get("contentType") as string;
-    const useMultiPart = formData.get("useMultiPart") === "true";
     const totalChunks = parseInt(formData.get("totalChunks") as string, 10);
+    // Use the same multi-part decision from init to ensure consistency
+    const useMultiPart = formData.get("useMultiPart") === "true";
 
     if (!uploadId || !filename || !totalChunks) {
       return NextResponse.json(
@@ -40,56 +61,70 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // 1. Read all chunks from Vercel Blob
+    const chunks: Buffer[] = [];
+    const blobUrls: string[] = [];
+
+    const { blobs } = await list({ prefix: `chunks/${uploadId}/` });
+
+    // Sort by part number
+    const sortedBlobs = blobs.sort((a, b) => {
+      const partA = parseInt(a.pathname.split("/").pop() || "0", 10);
+      const partB = parseInt(b.pathname.split("/").pop() || "0", 10);
+      return partA - partB;
+    });
+
+    if (sortedBlobs.length !== totalChunks) {
+      throw new Error(
+        `청크 수가 일치하지 않습니다. 예상: ${totalChunks}, 실제: ${sortedBlobs.length}`
+      );
+    }
+
+    // Fetch each chunk
+    for (const blob of sortedBlobs) {
+      const response = await fetch(blob.url);
+      const arrayBuffer = await response.arrayBuffer();
+      chunks.push(Buffer.from(arrayBuffer));
+      blobUrls.push(blob.url);
+    }
+
+    // 2. Combine all chunks
+    const combinedBuffer = Buffer.concat(chunks);
+    const fileSize = combinedBuffer.length;
+
     if (useMultiPart) {
-      // Multi-part upload: chunks were already sent to Notion
-      await completeMultiPartUpload(uploadId);
-    } else {
-      // Single-part upload: read chunks from Vercel Blob and combine
-      const chunks: Buffer[] = [];
-      const blobUrls: string[] = [];
+      // Multi-part upload: split into 10MB parts and send to Notion
+      const numberOfParts = Math.ceil(fileSize / NOTION_CHUNK_SIZE);
 
-      // List and fetch all chunks
-      const { blobs } = await list({ prefix: `chunks/${uploadId}/` });
+      for (let i = 0; i < numberOfParts; i++) {
+        const start = i * NOTION_CHUNK_SIZE;
+        const end = Math.min(start + NOTION_CHUNK_SIZE, fileSize);
+        const partBuffer = combinedBuffer.subarray(start, end);
 
-      // Sort by part number
-      const sortedBlobs = blobs.sort((a, b) => {
-        const partA = parseInt(a.pathname.split("/").pop() || "0", 10);
-        const partB = parseInt(b.pathname.split("/").pop() || "0", 10);
-        return partA - partB;
-      });
-
-      if (sortedBlobs.length !== totalChunks) {
-        throw new Error(
-          `청크 수가 일치하지 않습니다. 예상: ${totalChunks}, 실제: ${sortedBlobs.length}`
+        await sendFileData(
+          uploadId,
+          partBuffer,
+          contentType || "application/octet-stream",
+          i + 1 // part_number is 1-indexed
         );
       }
 
-      // Fetch each chunk
-      for (const blob of sortedBlobs) {
-        const response = await fetch(blob.url);
-        const arrayBuffer = await response.arrayBuffer();
-        chunks.push(Buffer.from(arrayBuffer));
-        blobUrls.push(blob.url);
-      }
-
-      // Combine all chunks
-      const combinedBuffer = Buffer.concat(chunks);
-
-      // Send combined file to Notion
+      // Complete multi-part upload
+      await completeMultiPartUpload(uploadId);
+    } else {
+      // Single-part upload: send entire file without part_number
       await sendFileData(
         uploadId,
         combinedBuffer,
         contentType || "application/octet-stream"
       );
-
-      // Clean up blobs
-      if (blobUrls.length > 0) {
-        await del(blobUrls);
-      }
     }
 
-    // Attach file to Notion page
+    // 4. Attach file to Notion page
     await attachFileToPage(uploadId, filename);
+
+    // 5. Clean up Vercel Blob chunks (always cleanup on success)
+    await cleanupBlobChunks(uploadId);
 
     return NextResponse.json({
       success: true,
@@ -97,6 +132,12 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Complete upload error:", error);
+
+    // Cleanup on error as well
+    if (uploadId) {
+      await cleanupBlobChunks(uploadId);
+    }
+
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "업로드 완료 실패" },
       { status: 500 }

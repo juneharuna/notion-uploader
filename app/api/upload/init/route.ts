@@ -6,6 +6,7 @@ import { createFileUpload } from "@/lib/notion";
 export const runtime = "nodejs";
 
 const NOTION_MULTIPART_THRESHOLD = 20 * 1024 * 1024; // 20MB
+const NOTION_CHUNK_SIZE = 10 * 1024 * 1024; // 10MB (Notion multi-part chunk size)
 
 interface InitRequest {
   filename: string;
@@ -44,12 +45,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Notion only supports multi_part for files > 20MB
+    // Determine if multi-part is needed based on file size
     const useMultiPart = fileSize > NOTION_MULTIPART_THRESHOLD;
 
     // Calculate number of parts for Notion (10MB chunks for multi-part)
-    const notionChunkSize = 10 * 1024 * 1024;
-    const notionParts = useMultiPart ? Math.ceil(fileSize / notionChunkSize) : undefined;
+    const notionParts = useMultiPart
+      ? Math.ceil(fileSize / NOTION_CHUNK_SIZE)
+      : undefined;
 
     const uploadObj = await createFileUpload(
       filename,
