@@ -27,6 +27,14 @@ function getHeaders() {
   return {
     Authorization: `Bearer ${NOTION_API_KEY}`,
     "Notion-Version": "2022-06-28",
+    // Note: file_uploads API requires newer version, but blocks API needs older version
+  };
+}
+
+function getFileUploadHeaders() {
+  return {
+    Authorization: `Bearer ${NOTION_API_KEY}`,
+    "Notion-Version": "2025-09-03",
   };
 }
 
@@ -51,7 +59,7 @@ async function createFileUpload(
   const response = await fetch(`${NOTION_API_BASE}/file_uploads`, {
     method: "POST",
     headers: {
-      ...getHeaders(),
+      ...getFileUploadHeaders(),
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
@@ -80,7 +88,7 @@ async function sendFileData(
 
   const response = await fetch(url, {
     method: "POST",
-    headers: getHeaders(),
+    headers: getFileUploadHeaders(),
     body: formData,
   });
 
@@ -100,7 +108,7 @@ async function completeMultiPartUpload(
     `${NOTION_API_BASE}/file_uploads/${uploadId}/complete`,
     {
       method: "POST",
-      headers: getHeaders(),
+      headers: getFileUploadHeaders(),
     }
   );
 

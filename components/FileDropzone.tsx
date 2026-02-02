@@ -24,10 +24,11 @@ interface FileWithProgress {
 }
 
 interface UploadProgressData {
-  phase: string;
-  progress: number;
+  phase?: string;
+  progress?: number;
   chunkIndex?: number;
   totalChunks?: number;
+  error?: string;
 }
 
 export default function FileDropzone() {
@@ -87,14 +88,20 @@ export default function FileDropzone() {
               if (line.startsWith("data: ")) {
                 try {
                   const data: UploadProgressData = JSON.parse(line.slice(6));
+
+                  // Check for error in SSE stream
+                  if (data.error) {
+                    throw new Error(data.error);
+                  }
+
                   setFiles((prev) =>
                     prev.map((f, idx) =>
                       idx === fileIndex
                         ? {
                             ...f,
-                            progress: data.progress,
+                            progress: data.progress || 0,
                             phase: getPhaseText(
-                              data.phase,
+                              data.phase || "",
                               data.chunkIndex,
                               data.totalChunks
                             ),
@@ -102,8 +109,10 @@ export default function FileDropzone() {
                         : f
                     )
                   );
-                } catch {
-                  // Ignore parse errors
+                } catch (parseError) {
+                  if (parseError instanceof Error && parseError.message !== "Unexpected token") {
+                    throw parseError;
+                  }
                 }
               }
             }
