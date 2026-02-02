@@ -1,14 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { readFile, unlink, readdir } from "fs/promises";
-import path from "path";
+import { list, del } from "@vercel/blob";
 import { verifyAuthToken, isPasswordEnabled } from "../../auth/route";
 import { completeMultiPartUpload, attachFileToPage, sendFileData } from "@/lib/notion";
 
 export const runtime = "nodejs";
-export const maxDuration = 300; // 5 minutes for large files
-
-const TEMP_DIR = "/tmp/notion-uploads";
+export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
   // Check authentication
@@ -21,7 +18,6 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Check environment variables
   if (!process.env.NOTION_API_KEY || !process.env.NOTION_PAGE_ID) {
     return NextResponse.json(
       { error: "Notion API 설정이 필요합니다" },
@@ -45,21 +41,35 @@ export async function POST(request: NextRequest) {
     }
 
     if (useMultiPart) {
-      // Multi-part upload: chunks were already sent to Notion, just complete
+      // Multi-part upload: chunks were already sent to Notion
       await completeMultiPartUpload(uploadId);
     } else {
-      // Single-part upload: read chunks from /tmp and combine
+      // Single-part upload: read chunks from Vercel Blob and combine
       const chunks: Buffer[] = [];
+      const blobUrls: string[] = [];
 
-      for (let i = 1; i <= totalChunks; i++) {
-        const chunkPath = path.join(TEMP_DIR, `${uploadId}_${i}`);
-        try {
-          const chunkData = await readFile(chunkPath);
-          chunks.push(chunkData);
-        } catch (err) {
-          console.error(`Failed to read chunk ${i}:`, err);
-          throw new Error(`청크 ${i}을(를) 찾을 수 없습니다. 다시 시도해주세요.`);
-        }
+      // List and fetch all chunks
+      const { blobs } = await list({ prefix: `chunks/${uploadId}/` });
+
+      // Sort by part number
+      const sortedBlobs = blobs.sort((a, b) => {
+        const partA = parseInt(a.pathname.split("/").pop() || "0", 10);
+        const partB = parseInt(b.pathname.split("/").pop() || "0", 10);
+        return partA - partB;
+      });
+
+      if (sortedBlobs.length !== totalChunks) {
+        throw new Error(
+          `청크 수가 일치하지 않습니다. 예상: ${totalChunks}, 실제: ${sortedBlobs.length}`
+        );
+      }
+
+      // Fetch each chunk
+      for (const blob of sortedBlobs) {
+        const response = await fetch(blob.url);
+        const arrayBuffer = await response.arrayBuffer();
+        chunks.push(Buffer.from(arrayBuffer));
+        blobUrls.push(blob.url);
       }
 
       // Combine all chunks
@@ -72,14 +82,9 @@ export async function POST(request: NextRequest) {
         contentType || "application/octet-stream"
       );
 
-      // Clean up temp files
-      for (let i = 1; i <= totalChunks; i++) {
-        const chunkPath = path.join(TEMP_DIR, `${uploadId}_${i}`);
-        try {
-          await unlink(chunkPath);
-        } catch {
-          // Ignore cleanup errors
-        }
+      // Clean up blobs
+      if (blobUrls.length > 0) {
+        await del(blobUrls);
       }
     }
 

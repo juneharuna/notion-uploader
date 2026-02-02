@@ -1,15 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { writeFile, mkdir } from "fs/promises";
-import { existsSync } from "fs";
-import path from "path";
+import { put } from "@vercel/blob";
 import { verifyAuthToken, isPasswordEnabled } from "../../auth/route";
 import { sendFileData } from "@/lib/notion";
 
 export const runtime = "nodejs";
-export const maxDuration = 60; // 1 minute per chunk
-
-const TEMP_DIR = "/tmp/notion-uploads";
+export const maxDuration = 60;
 
 export async function POST(request: NextRequest) {
   // Check authentication
@@ -22,7 +18,6 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Check environment variables
   if (!process.env.NOTION_API_KEY) {
     return NextResponse.json(
       { error: "Notion API 설정이 필요합니다" },
@@ -58,13 +53,12 @@ export async function POST(request: NextRequest) {
         partNum
       );
     } else {
-      // For single-part uploads, save chunk to /tmp for later assembly
-      if (!existsSync(TEMP_DIR)) {
-        await mkdir(TEMP_DIR, { recursive: true });
-      }
-
-      const chunkPath = path.join(TEMP_DIR, `${uploadId}_${partNum}`);
-      await writeFile(chunkPath, buffer);
+      // For single-part uploads, save chunk to Vercel Blob
+      const blobPath = `chunks/${uploadId}/${partNum}`;
+      await put(blobPath, buffer, {
+        access: "public",
+        addRandomSuffix: false,
+      });
     }
 
     return NextResponse.json({
