@@ -5,9 +5,12 @@ import { createFileUpload } from "@/lib/notion";
 
 export const runtime = "nodejs";
 
+const NOTION_MULTIPART_THRESHOLD = 20 * 1024 * 1024; // 20MB
+
 interface InitRequest {
   filename: string;
   contentType: string;
+  fileSize: number;
   totalChunks: number;
 }
 
@@ -32,28 +35,35 @@ export async function POST(request: NextRequest) {
 
   try {
     const body: InitRequest = await request.json();
-    const { filename, contentType, totalChunks } = body;
+    const { filename, contentType, fileSize, totalChunks } = body;
 
-    if (!filename || !contentType || !totalChunks) {
+    if (!filename || !contentType || !fileSize || !totalChunks) {
       return NextResponse.json(
         { error: "필수 파라미터가 누락되었습니다" },
         { status: 400 }
       );
     }
 
-    // Create file upload object on Notion
-    const isMultiPart = totalChunks > 1;
+    // Notion only supports multi_part for files > 20MB
+    const useMultiPart = fileSize > NOTION_MULTIPART_THRESHOLD;
+
+    // Calculate number of parts for Notion (10MB chunks for multi-part)
+    const notionChunkSize = 10 * 1024 * 1024;
+    const notionParts = useMultiPart ? Math.ceil(fileSize / notionChunkSize) : undefined;
+
     const uploadObj = await createFileUpload(
       filename,
       contentType,
-      isMultiPart,
-      isMultiPart ? totalChunks : undefined
+      useMultiPart,
+      notionParts
     );
 
     return NextResponse.json({
       uploadId: uploadObj.id,
       filename,
+      fileSize,
       totalChunks,
+      useMultiPart,
     });
   } catch (error) {
     console.error("Init upload error:", error);

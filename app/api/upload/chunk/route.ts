@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { writeFile, mkdir } from "fs/promises";
+import { existsSync } from "fs";
+import path from "path";
 import { verifyAuthToken, isPasswordEnabled } from "../../auth/route";
 import { sendFileData } from "@/lib/notion";
 
 export const runtime = "nodejs";
 export const maxDuration = 60; // 1 minute per chunk
+
+const TEMP_DIR = "/tmp/notion-uploads";
 
 export async function POST(request: NextRequest) {
   // Check authentication
@@ -31,6 +36,7 @@ export async function POST(request: NextRequest) {
     const uploadId = formData.get("uploadId") as string;
     const partNumber = formData.get("partNumber") as string;
     const contentType = formData.get("contentType") as string;
+    const useMultiPart = formData.get("useMultiPart") === "true";
 
     if (!chunk || !uploadId || !partNumber) {
       return NextResponse.json(
@@ -41,20 +47,31 @@ export async function POST(request: NextRequest) {
 
     const arrayBuffer = await chunk.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
-
-    // Send chunk to Notion
     const partNum = parseInt(partNumber, 10);
-    await sendFileData(
-      uploadId,
-      buffer,
-      contentType || "application/octet-stream",
-      partNum > 0 ? partNum : undefined
-    );
+
+    if (useMultiPart) {
+      // For multi-part uploads (files > 20MB), send directly to Notion
+      await sendFileData(
+        uploadId,
+        buffer,
+        contentType || "application/octet-stream",
+        partNum
+      );
+    } else {
+      // For single-part uploads, save chunk to /tmp for later assembly
+      if (!existsSync(TEMP_DIR)) {
+        await mkdir(TEMP_DIR, { recursive: true });
+      }
+
+      const chunkPath = path.join(TEMP_DIR, `${uploadId}_${partNum}`);
+      await writeFile(chunkPath, buffer);
+    }
 
     return NextResponse.json({
       success: true,
       uploadId,
       partNumber: partNum,
+      useMultiPart,
     });
   } catch (error) {
     console.error("Chunk upload error:", error);

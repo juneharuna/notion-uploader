@@ -1,16 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { readFile, unlink, readdir } from "fs/promises";
+import path from "path";
 import { verifyAuthToken, isPasswordEnabled } from "../../auth/route";
-import { completeMultiPartUpload, attachFileToPage } from "@/lib/notion";
+import { completeMultiPartUpload, attachFileToPage, sendFileData } from "@/lib/notion";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300; // 5 minutes for large files
 
-interface CompleteRequest {
-  uploadId: string;
-  filename: string;
-  totalChunks: number;
-}
+const TEMP_DIR = "/tmp/notion-uploads";
 
 export async function POST(request: NextRequest) {
   // Check authentication
@@ -32,19 +30,57 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body: CompleteRequest = await request.json();
-    const { uploadId, filename, totalChunks } = body;
+    const formData = await request.formData();
+    const uploadId = formData.get("uploadId") as string;
+    const filename = formData.get("filename") as string;
+    const contentType = formData.get("contentType") as string;
+    const useMultiPart = formData.get("useMultiPart") === "true";
+    const totalChunks = parseInt(formData.get("totalChunks") as string, 10);
 
-    if (!uploadId || !filename) {
+    if (!uploadId || !filename || !totalChunks) {
       return NextResponse.json(
         { error: "필수 파라미터가 누락되었습니다" },
         { status: 400 }
       );
     }
 
-    // Complete multi-part upload if there were multiple chunks
-    if (totalChunks > 1) {
+    if (useMultiPart) {
+      // Multi-part upload: chunks were already sent to Notion, just complete
       await completeMultiPartUpload(uploadId);
+    } else {
+      // Single-part upload: read chunks from /tmp and combine
+      const chunks: Buffer[] = [];
+
+      for (let i = 1; i <= totalChunks; i++) {
+        const chunkPath = path.join(TEMP_DIR, `${uploadId}_${i}`);
+        try {
+          const chunkData = await readFile(chunkPath);
+          chunks.push(chunkData);
+        } catch (err) {
+          console.error(`Failed to read chunk ${i}:`, err);
+          throw new Error(`청크 ${i}을(를) 찾을 수 없습니다. 다시 시도해주세요.`);
+        }
+      }
+
+      // Combine all chunks
+      const combinedBuffer = Buffer.concat(chunks);
+
+      // Send combined file to Notion
+      await sendFileData(
+        uploadId,
+        combinedBuffer,
+        contentType || "application/octet-stream"
+      );
+
+      // Clean up temp files
+      for (let i = 1; i <= totalChunks; i++) {
+        const chunkPath = path.join(TEMP_DIR, `${uploadId}_${i}`);
+        try {
+          await unlink(chunkPath);
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
     }
 
     // Attach file to Notion page

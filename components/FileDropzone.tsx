@@ -56,6 +56,7 @@ export default function FileDropzone() {
         body: JSON.stringify({
           filename: file.name,
           contentType,
+          fileSize: file.size,
           totalChunks,
         }),
       });
@@ -65,9 +66,9 @@ export default function FileDropzone() {
         throw new Error(errorData.error || "업로드 초기화 실패");
       }
 
-      const { uploadId } = await initRes.json();
+      const { uploadId, useMultiPart } = await initRes.json();
 
-      // 2. Upload chunks
+      // 2. Upload chunks (for multi-part) or just track progress (for single-part)
       for (let i = 0; i < totalChunks; i++) {
         const start = i * CHUNK_SIZE;
         const end = Math.min(start + CHUNK_SIZE, file.size);
@@ -78,6 +79,7 @@ export default function FileDropzone() {
         formData.append("uploadId", uploadId);
         formData.append("partNumber", String(i + 1));
         formData.append("contentType", contentType);
+        formData.append("useMultiPart", String(useMultiPart));
 
         const chunkPhase =
           totalChunks > 1
@@ -102,14 +104,16 @@ export default function FileDropzone() {
       // 3. Complete upload
       updateProgress(92, "Notion에 첨부 중...");
 
+      const completeFormData = new FormData();
+      completeFormData.append("uploadId", uploadId);
+      completeFormData.append("filename", file.name);
+      completeFormData.append("contentType", contentType);
+      completeFormData.append("useMultiPart", String(useMultiPart));
+      completeFormData.append("totalChunks", String(totalChunks));
+
       const completeRes = await fetch("/api/upload/complete", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          uploadId,
-          filename: file.name,
-          totalChunks,
-        }),
+        body: completeFormData,
       });
 
       if (!completeRes.ok) {
