@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { verifyAuthToken, isPasswordEnabled } from "../../auth/route";
+import { requireAuth } from "@/lib/auth";
 import { createFileUpload } from "@/lib/notion";
 
 export const runtime = "nodejs";
@@ -16,15 +15,8 @@ interface InitRequest {
 }
 
 export async function POST(request: NextRequest) {
-  // Check authentication
-  if (isPasswordEnabled()) {
-    const cookieStore = await cookies();
-    const authToken = cookieStore.get("auth_token");
-
-    if (!authToken || !verifyAuthToken(authToken.value)) {
-      return NextResponse.json({ error: "인증이 필요합니다" }, { status: 401 });
-    }
-  }
+  const authError = await requireAuth();
+  if (authError) return authError;
 
   // Check environment variables
   if (!process.env.NOTION_API_KEY || !process.env.NOTION_PAGE_ID) {

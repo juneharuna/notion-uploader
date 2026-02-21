@@ -1,21 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { put } from "@vercel/blob";
-import { verifyAuthToken, isPasswordEnabled } from "../../auth/route";
+import { requireAuth } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(request: NextRequest) {
-  // Check authentication
-  if (isPasswordEnabled()) {
-    const cookieStore = await cookies();
-    const authToken = cookieStore.get("auth_token");
-
-    if (!authToken || !verifyAuthToken(authToken.value)) {
-      return NextResponse.json({ error: "인증이 필요합니다" }, { status: 401 });
-    }
-  }
+  const authError = await requireAuth();
+  if (authError) return authError;
 
   if (!process.env.NOTION_API_KEY) {
     return NextResponse.json(

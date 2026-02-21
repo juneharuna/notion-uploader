@@ -1,20 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { list, del } from "@vercel/blob";
-import { verifyAuthToken, isPasswordEnabled } from "../../auth/route";
+import { requireAuth } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
-  // Check authentication
-  if (isPasswordEnabled()) {
-    const cookieStore = await cookies();
-    const authToken = cookieStore.get("auth_token");
-
-    if (!authToken || !verifyAuthToken(authToken.value)) {
-      return NextResponse.json({ error: "인증이 필요합니다" }, { status: 401 });
-    }
-  }
+  const authError = await requireAuth();
+  if (authError) return authError;
 
   try {
     const { uploadId } = await request.json();
@@ -37,7 +29,7 @@ export async function POST(request: NextRequest) {
     console.error("Cleanup error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "정리 실패" },
-      { status: 500 }
+      { status: 422 }
     );
   }
 }

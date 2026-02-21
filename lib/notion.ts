@@ -11,17 +11,6 @@ export interface FileUploadResponse {
   };
 }
 
-export interface UploadProgress {
-  phase: "creating" | "uploading" | "completing" | "attaching" | "done";
-  progress: number;
-  chunkIndex?: number;
-  totalChunks?: number;
-}
-
-export type ProgressCallback = (progress: UploadProgress) => void;
-
-const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB per chunk (Notion API limit)
-const MAX_SINGLE_UPLOAD_SIZE = 20 * 1024 * 1024; // 20MB
 
 function getNotionApiKey(): string {
   const key = process.env.NOTION_API_KEY;
@@ -187,77 +176,6 @@ export async function attachFileToPage(
   }
 }
 
-// Main upload function (for small files under Vercel limit - kept for backward compatibility)
-export async function uploadFileToNotion(
-  filename: string,
-  contentType: string,
-  fileBuffer: Buffer,
-  onProgress?: ProgressCallback
-): Promise<{ success: boolean; fileUploadId: string }> {
-  const fileSize = fileBuffer.length;
-  const isMultiPart = fileSize > MAX_SINGLE_UPLOAD_SIZE;
 
-  onProgress?.({ phase: "creating", progress: 0 });
-
-  if (isMultiPart) {
-    // Multi-part upload for files > 20MB
-    const numberOfParts = Math.ceil(fileSize / CHUNK_SIZE);
-
-    const uploadObj = await createFileUpload(
-      filename,
-      contentType,
-      true,
-      numberOfParts
-    );
-
-    onProgress?.({ phase: "uploading", progress: 5, chunkIndex: 0, totalChunks: numberOfParts });
-
-    // Upload each chunk
-    for (let i = 0; i < numberOfParts; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, fileSize);
-      const chunk = fileBuffer.subarray(start, end);
-
-      await sendFileData(uploadObj.id, chunk, contentType, i + 1);
-
-      const progress = 5 + ((i + 1) / numberOfParts) * 80;
-      onProgress?.({
-        phase: "uploading",
-        progress,
-        chunkIndex: i + 1,
-        totalChunks: numberOfParts,
-      });
-    }
-
-    onProgress?.({ phase: "completing", progress: 85 });
-    await completeMultiPartUpload(uploadObj.id);
-
-    onProgress?.({ phase: "attaching", progress: 90 });
-    await attachFileToPage(uploadObj.id, filename);
-
-    onProgress?.({ phase: "done", progress: 100 });
-
-    return { success: true, fileUploadId: uploadObj.id };
-  } else {
-    // Single upload for files <= 20MB
-    const uploadObj = await createFileUpload(filename, contentType);
-
-    onProgress?.({ phase: "uploading", progress: 20 });
-    await sendFileData(uploadObj.id, fileBuffer, contentType);
-
-    onProgress?.({ phase: "attaching", progress: 80 });
-    await attachFileToPage(uploadObj.id, filename);
-
-    onProgress?.({ phase: "done", progress: 100 });
-
-    return { success: true, fileUploadId: uploadObj.id };
-  }
-}
-
-export function formatFileSize(bytes: number): string {
-  if (bytes === 0) return "0 Bytes";
-  const k = 1024;
-  const sizes = ["Bytes", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-}
+// Re-export for backward compatibility
+export { formatFileSize } from "./format";

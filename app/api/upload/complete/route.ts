@@ -1,34 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { list, del } from "@vercel/blob";
-import { verifyAuthToken, isPasswordEnabled } from "../../auth/route";
+import { list } from "@vercel/blob";
+import { requireAuth } from "@/lib/auth";
 import { attachFileToPage } from "@/lib/notion";
 import { streamToNotion } from "@/lib/stream-rechunker";
+import { cleanupBlobChunks } from "../cleanup/route";
 
 export const runtime = "nodejs";
 export const maxDuration = 800; // Pro plan maximum
 
-async function cleanupBlobChunks(uploadId: string): Promise<void> {
+async function safeCleanup(uploadId: string): Promise<void> {
   try {
-    const { blobs } = await list({ prefix: `chunks/${uploadId}/` });
-    if (blobs.length > 0) {
-      await del(blobs.map((b) => b.url));
-    }
+    await cleanupBlobChunks(uploadId);
   } catch (error) {
     console.error("Cleanup error:", error);
   }
 }
 
 export async function POST(request: NextRequest) {
-  // Check authentication
-  if (isPasswordEnabled()) {
-    const cookieStore = await cookies();
-    const authToken = cookieStore.get("auth_token");
-
-    if (!authToken || !verifyAuthToken(authToken.value)) {
-      return NextResponse.json({ error: "인증이 필요합니다" }, { status: 401 });
-    }
-  }
+  const authError = await requireAuth();
+  if (authError) return authError;
 
   if (!process.env.NOTION_API_KEY || !process.env.NOTION_PAGE_ID) {
     return NextResponse.json(
@@ -104,7 +94,7 @@ export async function POST(request: NextRequest) {
           await attachFileToPage(capturedUploadId, filename);
 
           sendEvent({ phase: "cleanup", message: "임시 파일 정리 중..." });
-          await cleanupBlobChunks(capturedUploadId);
+          await safeCleanup(capturedUploadId);
 
           sendEvent({
             phase: "done",
@@ -118,7 +108,7 @@ export async function POST(request: NextRequest) {
           sendEvent({ phase: "error", error: errorMessage });
 
           // Cleanup on error
-          await cleanupBlobChunks(capturedUploadId);
+          await safeCleanup(capturedUploadId);
 
           controller.close();
         }
@@ -136,7 +126,7 @@ export async function POST(request: NextRequest) {
     console.error("Complete upload error:", error);
 
     if (uploadId) {
-      await cleanupBlobChunks(uploadId);
+      await safeCleanup(uploadId);
     }
 
     return NextResponse.json(
