@@ -9,7 +9,7 @@ import {
 } from "@/lib/notion";
 
 export const runtime = "nodejs";
-export const maxDuration = 800; // Pro plan maximum
+export const maxDuration = 300; // Hobby plan maximum
 
 const NOTION_CHUNK_SIZE = 10 * 1024 * 1024; // 10MB (Notion multi-part chunk size)
 
