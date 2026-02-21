@@ -1,3 +1,5 @@
+import { fetchWithRetry } from "./retry";
+
 const NOTION_API_BASE = "https://api.notion.com/v1";
 
 export interface FileUploadResponse {
@@ -64,7 +66,7 @@ export async function createFileUpload(
     body.number_of_parts = numberOfParts;
   }
 
-  const response = await fetch(`${NOTION_API_BASE}/file_uploads`, {
+  const response = await fetchWithRetry(`${NOTION_API_BASE}/file_uploads`, {
     method: "POST",
     headers: {
       ...getFileUploadHeaders(),
@@ -98,11 +100,11 @@ export async function sendFileData(
 
   const url = `${NOTION_API_BASE}/file_uploads/${uploadId}/send`;
 
-  const response = await fetch(url, {
+  const response = await fetchWithRetry(url, {
     method: "POST",
     headers: getFileUploadHeaders(),
     body: formData,
-  });
+  }, { maxRetries: 5 });
 
   if (!response.ok) {
     const error = await response.text();
@@ -116,7 +118,7 @@ export async function sendFileData(
 export async function completeMultiPartUpload(
   uploadId: string
 ): Promise<FileUploadResponse> {
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `${NOTION_API_BASE}/file_uploads/${uploadId}/complete`,
     {
       method: "POST",
@@ -139,7 +141,7 @@ export async function attachFileToPage(
   pageId?: string
 ): Promise<void> {
   const targetPageId = pageId || getNotionPageId();
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `${NOTION_API_BASE}/blocks/${targetPageId}/children`,
     {
       method: "PATCH",

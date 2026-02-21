@@ -13,6 +13,8 @@ import {
   ThemeIcon,
 } from "@mantine/core";
 import { formatFileSize } from "@/lib/notion";
+import { clientFetchWithRetry } from "@/lib/client-retry";
+import { uploadChunksParallel } from "@/lib/upload-pool";
 
 // 4MB chunk size to stay under Vercel's 4.5MB limit (free tier)
 const CHUNK_SIZE = 4 * 1024 * 1024;
@@ -32,7 +34,7 @@ export default function FileDropzone() {
 
   const cleanupUpload = async (uploadId: string) => {
     try {
-      await fetch("/api/upload/cleanup", {
+      await clientFetchWithRetry("/api/upload/cleanup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ uploadId }),
@@ -63,7 +65,7 @@ export default function FileDropzone() {
       // 1. Initialize upload
       updateProgress(0, "업로드 준비 중...");
 
-      const initRes = await fetch("/api/upload/init", {
+      const initRes = await clientFetchWithRetry("/api/upload/init", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -83,39 +85,43 @@ export default function FileDropzone() {
       uploadId = initData.uploadId;
       const useMultiPart = initData.useMultiPart;
 
-      // 2. Upload chunks to Vercel Blob
-      for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
-        const chunk = file.slice(start, end);
+      // 2. Upload chunks to Vercel Blob (parallel, 3 concurrent)
+      const chunkItems = Array.from({ length: totalChunks }, (_, i) => ({
+        blob: file.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, file.size)),
+        partNumber: i + 1,
+      }));
 
-        const formData = new FormData();
-        formData.append("chunk", chunk);
-        formData.append("uploadId", uploadId!);
-        formData.append("partNumber", String(i + 1));
+      await uploadChunksParallel(
+        chunkItems,
+        async (blob, partNumber) => {
+          const formData = new FormData();
+          formData.append("chunk", blob);
+          formData.append("uploadId", uploadId!);
+          formData.append("partNumber", String(partNumber));
 
-        const chunkPhase =
-          totalChunks > 1
-            ? `업로드 중 (${i + 1}/${totalChunks})`
-            : "업로드 중...";
+          const chunkRes = await clientFetchWithRetry("/api/upload/chunk", {
+            method: "POST",
+            body: formData,
+          }, { maxRetries: 5 });
 
-        // Progress: 5% for init, 85% for chunks, 10% for completion
-        const chunkProgress = 5 + ((i + 1) / totalChunks) * 85;
-        updateProgress(chunkProgress, chunkPhase);
-
-        const chunkRes = await fetch("/api/upload/chunk", {
-          method: "POST",
-          body: formData,
-        });
-
-        if (!chunkRes.ok) {
-          const errorData = await chunkRes.json();
-          throw new Error(errorData.error || `청크 ${i + 1} 업로드 실패`);
+          if (!chunkRes.ok) {
+            const errorData = await chunkRes.json();
+            throw new Error(errorData.error || `청크 ${partNumber} 업로드 실패`);
+          }
+        },
+        {
+          concurrency: 3,
+          onProgress: (completed, total) => {
+            const chunkPhase =
+              total > 1 ? `업로드 중 (${completed}/${total})` : "업로드 중...";
+            const chunkProgress = 5 + (completed / total) * 85;
+            updateProgress(chunkProgress, chunkPhase);
+          },
         }
-      }
+      );
 
-      // 3. Complete upload (combines chunks and sends to Notion)
-      updateProgress(92, "Notion에 첨부 중...");
+      // 3. Complete upload via SSE (streams progress from server)
+      updateProgress(92, "Notion에 전송 준비 중...");
 
       const completeFormData = new FormData();
       completeFormData.append("uploadId", uploadId!);
@@ -124,6 +130,7 @@ export default function FileDropzone() {
       completeFormData.append("totalChunks", String(totalChunks));
       completeFormData.append("useMultiPart", String(useMultiPart));
 
+      // SSE: no retry on this call (streaming response)
       const completeRes = await fetch("/api/upload/complete", {
         method: "POST",
         body: completeFormData,
@@ -132,6 +139,45 @@ export default function FileDropzone() {
       if (!completeRes.ok) {
         const errorData = await completeRes.json();
         throw new Error(errorData.error || "업로드 완료 처리 실패");
+      }
+
+      // Consume SSE stream for real-time progress
+      const reader = completeRes.body!.getReader();
+      const decoder = new TextDecoder();
+      let sseError: string | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const text = decoder.decode(value, { stream: true });
+        for (const line of text.split("\n")) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+
+            if (event.phase === "reading") {
+              updateProgress(92, "Blob 청크 읽는 중...");
+            } else if (event.phase === "sending") {
+              const progress = 92 + (event.partNumber / event.totalParts) * 5;
+              updateProgress(progress, event.message);
+            } else if (event.phase === "attaching") {
+              updateProgress(98, "페이지에 첨부 중...");
+            } else if (event.phase === "cleanup") {
+              updateProgress(99, "정리 중...");
+            } else if (event.phase === "done") {
+              // handled below
+            } else if (event.phase === "error") {
+              sseError = event.error;
+            }
+          } catch {
+            // skip malformed SSE lines
+          }
+        }
+      }
+
+      if (sseError) {
+        throw new Error(sseError);
       }
 
       // Success
