@@ -275,4 +275,68 @@ describe("fetchWithRetry", () => {
     expect(options.method).toBe("POST");
     expect(options.headers).toEqual({ "Content-Type": "application/json" });
   });
+
+  it("should abort request on timeout and retry", async () => {
+    // First call: hangs until aborted; second call: succeeds
+    mockFetch
+      .mockImplementationOnce((_url: string, init: RequestInit) => {
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          });
+        });
+      })
+      .mockResolvedValueOnce({ ok: true, status: 200 });
+
+    const res = await fetchWithRetry(
+      "https://api.example.com",
+      {},
+      { ...fastOptions, maxRetries: 1, timeoutMs: 50 }
+    );
+
+    expect(res.ok).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("should throw AbortError after max retries with timeout", async () => {
+    mockFetch.mockImplementation((_url: string, init: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      });
+    });
+
+    await expect(
+      fetchWithRetry("https://api.example.com", {}, {
+        ...fastOptions,
+        maxRetries: 1,
+        timeoutMs: 50,
+      })
+    ).rejects.toThrow();
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("should pass AbortSignal to fetch when timeoutMs is set", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
+
+    await fetchWithRetry(
+      "https://api.example.com",
+      {},
+      { ...fastOptions, timeoutMs: 5000 }
+    );
+
+    const [, options] = mockFetch.mock.calls[0];
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("should NOT pass AbortSignal when timeoutMs is not set", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
+
+    await fetchWithRetry("https://api.example.com", {}, fastOptions);
+
+    const [, options] = mockFetch.mock.calls[0];
+    expect(options.signal).toBeUndefined();
+  });
 });

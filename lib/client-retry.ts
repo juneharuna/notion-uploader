@@ -3,6 +3,7 @@ export interface ClientRetryOptions {
   baseDelayMs: number;
   maxDelayMs: number;
   retryableStatuses: number[];
+  timeoutMs?: number;
 }
 
 const DEFAULT_OPTIONS: ClientRetryOptions = {
@@ -43,6 +44,12 @@ function getDelay(
   return Math.min(exponential + jitter, maxDelayMs);
 }
 
+function isRetryableError(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  return false;
+}
+
 export async function clientFetchWithRetry(
   url: string,
   init: RequestInit,
@@ -52,8 +59,20 @@ export async function clientFetchWithRetry(
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
+    // Set up per-request timeout via AbortController
+    let controller: AbortController | undefined;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    if (opts.timeoutMs) {
+      controller = new AbortController();
+      timeoutId = setTimeout(() => controller!.abort(), opts.timeoutMs);
+    }
+
     try {
-      const response = await fetch(url, init);
+      const fetchInit = controller
+        ? { ...init, signal: controller.signal }
+        : init;
+      const response = await fetch(url, fetchInit);
 
       if (response.ok) {
         return response;
@@ -86,8 +105,8 @@ export async function clientFetchWithRetry(
 
       await sleep(delay);
     } catch (error) {
-      if (error instanceof TypeError) {
-        lastError = error;
+      if (isRetryableError(error)) {
+        lastError = error as Error;
         if (attempt === opts.maxRetries) {
           throw error;
         }
@@ -97,6 +116,8 @@ export async function clientFetchWithRetry(
       }
 
       throw error;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
     }
   }
 

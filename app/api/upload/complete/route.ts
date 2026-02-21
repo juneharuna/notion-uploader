@@ -46,6 +46,7 @@ export async function POST(request: NextRequest) {
     const contentType = formData.get("contentType") as string;
     const totalChunks = parseInt(formData.get("totalChunks") as string, 10);
     const useMultiPart = formData.get("useMultiPart") === "true";
+    const fileSize = formData.get("fileSize") ? parseInt(formData.get("fileSize") as string, 10) : undefined;
 
     if (!uploadId || !filename || !totalChunks) {
       return NextResponse.json(
@@ -95,7 +96,8 @@ export async function POST(request: NextRequest) {
                 totalParts,
                 message: `Notion에 전송 중 (${partNumber}/${totalParts})`,
               });
-            }
+            },
+            fileSize
           );
 
           sendEvent({ phase: "attaching", message: "페이지에 첨부 중..." });

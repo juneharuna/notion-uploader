@@ -2,6 +2,8 @@ import { sendFileData, completeMultiPartUpload } from "./notion";
 import { fetchWithRetry } from "./retry";
 
 const NOTION_CHUNK_SIZE = 10 * 1024 * 1024; // 10MB
+const PREFETCH_CONCURRENCY = 3;
+const SEND_CONCURRENCY = 2;
 
 interface BlobInfo {
   url: string;
@@ -10,7 +12,11 @@ interface BlobInfo {
 
 /**
  * Streams Blob chunks to Notion API, re-chunking from 4MB to 10MB on the fly.
- * Memory usage is O(NOTION_CHUNK_SIZE) = O(10MB) regardless of total file size.
+ *
+ * Optimizations:
+ * - Sliding window prefetch: fetches 3 blobs ahead in parallel
+ * - Buffer array accumulation: avoids O(n²) Buffer.concat in loop
+ * - Parallel Notion sends: sends 2 parts concurrently
  *
  * For single-part uploads: accumulates all data into one buffer and sends without part_number.
  * For multi-part uploads: buffers 10MB at a time and sends as numbered parts.
@@ -20,17 +26,49 @@ export async function streamToNotion(
   sortedBlobs: BlobInfo[],
   contentType: string,
   useMultiPart: boolean,
-  onPartSent?: (partNumber: number, totalParts: number) => void
+  onPartSent?: (partNumber: number, totalParts: number) => void,
+  totalFileSize?: number
 ): Promise<void> {
   if (useMultiPart) {
     await streamMultiPart(
       uploadId,
       sortedBlobs,
       contentType,
-      onPartSent
+      onPartSent,
+      totalFileSize
     );
   } else {
     await streamSinglePart(uploadId, sortedBlobs, contentType);
+  }
+}
+
+/**
+ * Sliding window prefetch: fetches blobs ahead in parallel while maintaining order.
+ * FIFO queue ensures blobs are yielded in index order.
+ */
+async function* prefetchBlobs(
+  sortedBlobs: BlobInfo[],
+  concurrency: number = PREFETCH_CONCURRENCY
+): AsyncGenerator<Buffer> {
+  const pending: Promise<Buffer>[] = [];
+  let nextIdx = 0;
+
+  const fetchOne = (blob: BlobInfo): Promise<Buffer> =>
+    fetchWithRetry(blob.url, { method: "GET" }, { timeoutMs: 30_000 })
+      .then((r) => r.arrayBuffer())
+      .then((ab) => Buffer.from(ab));
+
+  // Seed the prefetch queue
+  while (nextIdx < Math.min(concurrency, sortedBlobs.length)) {
+    pending.push(fetchOne(sortedBlobs[nextIdx++]));
+  }
+
+  // Consume from front, replenish at back
+  while (pending.length > 0) {
+    yield await pending.shift()!;
+    if (nextIdx < sortedBlobs.length) {
+      pending.push(fetchOne(sortedBlobs[nextIdx++]));
+    }
   }
 }
 
@@ -39,13 +77,10 @@ async function streamSinglePart(
   sortedBlobs: BlobInfo[],
   contentType: string
 ): Promise<void> {
-  // For single-part, we still need to combine all chunks (max 20MB)
   const chunks: Buffer[] = [];
 
-  for (const blob of sortedBlobs) {
-    const response = await fetchWithRetry(blob.url, { method: "GET" });
-    const arrayBuffer = await response.arrayBuffer();
-    chunks.push(Buffer.from(arrayBuffer));
+  for await (const chunk of prefetchBlobs(sortedBlobs)) {
+    chunks.push(chunk);
   }
 
   const combinedBuffer = Buffer.concat(chunks);
@@ -56,48 +91,73 @@ async function streamMultiPart(
   uploadId: string,
   sortedBlobs: BlobInfo[],
   contentType: string,
-  onPartSent?: (partNumber: number, totalParts: number) => void
+  onPartSent?: (partNumber: number, totalParts: number) => void,
+  totalFileSize?: number
 ): Promise<void> {
-  let buffer = Buffer.alloc(0);
+  // Buffer accumulation: collect chunks in array, concat only when flushing
+  const bufferChunks: Buffer[] = [];
+  let bufferedSize = 0;
   let partNumber = 1;
 
-  // Estimate total parts (will be exact after processing all blobs)
-  // We'll update the estimate as we go
-  let processedSize = 0;
+  // Calculate totalParts accurately if fileSize is known, otherwise estimate
+  const totalParts = totalFileSize
+    ? Math.ceil(totalFileSize / NOTION_CHUNK_SIZE)
+    : undefined;
 
-  for (const blob of sortedBlobs) {
-    const response = await fetchWithRetry(blob.url, { method: "GET" });
-    const arrayBuffer = await response.arrayBuffer();
-    const chunk = Buffer.from(arrayBuffer);
-    processedSize += chunk.length;
+  // Sliding window for parallel Notion sends
+  const sendQueue: Promise<void>[] = [];
 
-    buffer = Buffer.concat([buffer, chunk]);
+  for await (const chunk of prefetchBlobs(sortedBlobs)) {
+    bufferChunks.push(chunk);
+    bufferedSize += chunk.length;
 
     // Flush 10MB parts as they accumulate
-    while (buffer.length >= NOTION_CHUNK_SIZE) {
-      const part = buffer.subarray(0, NOTION_CHUNK_SIZE);
-      buffer = Buffer.from(buffer.subarray(NOTION_CHUNK_SIZE));
+    while (bufferedSize >= NOTION_CHUNK_SIZE) {
+      const combined = Buffer.concat(bufferChunks);
+      const part = combined.subarray(0, NOTION_CHUNK_SIZE);
+      const remainder = combined.subarray(NOTION_CHUNK_SIZE);
 
-      await sendFileData(uploadId, part, contentType, partNumber);
+      // Reset buffer
+      bufferChunks.length = 0;
+      if (remainder.length > 0) {
+        bufferChunks.push(Buffer.from(remainder));
+      }
+      bufferedSize = remainder.length;
 
-      // Estimate total parts based on what we've seen so far
-      const avgBlobSize = processedSize / (sortedBlobs.indexOf(blob) + 1);
-      const estimatedTotalSize = avgBlobSize * sortedBlobs.length;
-      const estimatedTotalParts = Math.ceil(
-        estimatedTotalSize / NOTION_CHUNK_SIZE
+      // Parallel send: wait for oldest if at capacity
+      if (sendQueue.length >= SEND_CONCURRENCY) {
+        await sendQueue.shift();
+      }
+
+      const currentPart = partNumber;
+      const estimatedTotal = totalParts ?? currentPart; // fallback to current part count
+      sendQueue.push(
+        sendFileData(uploadId, Buffer.from(part), contentType, currentPart)
+          .then(() => onPartSent?.(currentPart, estimatedTotal))
       );
-
-      onPartSent?.(partNumber, estimatedTotalParts);
       partNumber++;
     }
   }
 
   // Flush remaining data
-  if (buffer.length > 0) {
-    const totalParts = partNumber; // This is the last part
-    await sendFileData(uploadId, buffer, contentType, partNumber);
-    onPartSent?.(partNumber, totalParts);
+  if (bufferedSize > 0) {
+    const remainingBuffer = Buffer.concat(bufferChunks);
+    const currentPart = partNumber;
+    const finalTotal = totalParts ?? currentPart;
+
+    // Wait for queue before final send
+    if (sendQueue.length >= SEND_CONCURRENCY) {
+      await sendQueue.shift();
+    }
+
+    sendQueue.push(
+      sendFileData(uploadId, remainingBuffer, contentType, currentPart)
+        .then(() => onPartSent?.(currentPart, finalTotal))
+    );
   }
+
+  // Wait for all remaining sends to complete
+  await Promise.all(sendQueue);
 
   await completeMultiPartUpload(uploadId);
 }

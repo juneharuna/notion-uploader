@@ -34,6 +34,17 @@ function createMockBlobResponse(size: number): {
   return { arrayBuffer: () => Promise.resolve(buffer) };
 }
 
+/**
+ * Helper: build a map from part_number to [uploadId, buffer, contentType, partNumber]
+ */
+function getCallsByPartNumber(calls: unknown[][]) {
+  const map = new Map<number, unknown[]>();
+  for (const call of calls) {
+    map.set(call[3] as number, call);
+  }
+  return map;
+}
+
 describe("streamToNotion", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -80,21 +91,19 @@ describe("streamToNotion", () => {
     );
 
     // 32MB / 10MB = 3 full parts + 1 partial (2MB)
-    // Part 1: 10MB, Part 2: 10MB, Part 3: 10MB, Part 4: 2MB
     expect(sendFileData).toHaveBeenCalledTimes(4);
 
-    // Verify part numbers
+    // Verify all part numbers are present (order may vary due to parallel sends)
     const calls = (sendFileData as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls[0][3]).toBe(1);
-    expect(calls[1][3]).toBe(2);
-    expect(calls[2][3]).toBe(3);
-    expect(calls[3][3]).toBe(4);
+    const partNumbers = calls.map((c: unknown[]) => c[3] as number).sort();
+    expect(partNumbers).toEqual([1, 2, 3, 4]);
 
-    // Verify sizes
-    expect(calls[0][1].length).toBe(NOTION_CHUNK_SIZE); // 10MB
-    expect(calls[1][1].length).toBe(NOTION_CHUNK_SIZE); // 10MB
-    expect(calls[2][1].length).toBe(NOTION_CHUNK_SIZE); // 10MB
-    expect(calls[3][1].length).toBe(2 * 1024 * 1024); // 2MB remainder
+    // Verify sizes by part number
+    const byPart = getCallsByPartNumber(calls);
+    expect((byPart.get(1)![1] as Buffer).length).toBe(NOTION_CHUNK_SIZE); // 10MB
+    expect((byPart.get(2)![1] as Buffer).length).toBe(NOTION_CHUNK_SIZE); // 10MB
+    expect((byPart.get(3)![1] as Buffer).length).toBe(NOTION_CHUNK_SIZE); // 10MB
+    expect((byPart.get(4)![1] as Buffer).length).toBe(2 * 1024 * 1024); // 2MB remainder
 
     // Multi-part: completeMultiPartUpload should be called
     expect(completeMultiPartUpload).toHaveBeenCalledWith("upload-123");
@@ -113,13 +122,15 @@ describe("streamToNotion", () => {
     // 20MB / 10MB = exactly 2 parts
     expect(sendFileData).toHaveBeenCalledTimes(2);
     const calls = (sendFileData as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls[0][1].length).toBe(NOTION_CHUNK_SIZE); // 10MB
-    expect(calls[1][1].length).toBe(NOTION_CHUNK_SIZE); // 10MB
+    const byPart = getCallsByPartNumber(calls);
+    expect((byPart.get(1)![1] as Buffer).length).toBe(NOTION_CHUNK_SIZE); // 10MB
+    expect((byPart.get(2)![1] as Buffer).length).toBe(NOTION_CHUNK_SIZE); // 10MB
   });
 
-  it("should call onPartSent callback for multi-part", async () => {
+  it("should call onPartSent callback for multi-part with totalFileSize", async () => {
     const blobChunkSize = 4 * 1024 * 1024;
     const blobs = createMockBlobs(8, blobChunkSize); // 32MB
+    const totalFileSize = 8 * blobChunkSize; // 32MB
 
     mockFetch.mockImplementation(() => {
       return Promise.resolve(createMockBlobResponse(blobChunkSize));
@@ -131,15 +142,21 @@ describe("streamToNotion", () => {
       blobs,
       "application/zip",
       true,
-      onPartSent
+      onPartSent,
+      totalFileSize
     );
 
     // 4 parts sent
     expect(onPartSent).toHaveBeenCalledTimes(4);
-    expect(onPartSent).toHaveBeenNthCalledWith(1, 1, 4);
-    expect(onPartSent).toHaveBeenNthCalledWith(2, 2, 4);
-    expect(onPartSent).toHaveBeenNthCalledWith(3, 3, 4);
-    expect(onPartSent).toHaveBeenNthCalledWith(4, 4, 4);
+
+    // Verify all part numbers were reported (order may vary due to parallel sends)
+    const sentParts = onPartSent.mock.calls.map((c: unknown[]) => c[0] as number).sort();
+    expect(sentParts).toEqual([1, 2, 3, 4]);
+
+    // Each callback should report totalParts = 4 (calculated from totalFileSize)
+    for (const call of onPartSent.mock.calls) {
+      expect(call[1]).toBe(4); // Math.ceil(32MB / 10MB) = 4
+    }
   });
 
   it("should throw on Blob fetch error", async () => {
@@ -169,5 +186,23 @@ describe("streamToNotion", () => {
     await expect(
       streamToNotion("upload-123", blobs, "application/zip", true)
     ).rejects.toThrow("Notion API error");
+  });
+
+  it("should use prefetch for single-part (verifies all blobs are fetched)", async () => {
+    const blobChunkSize = 4 * 1024 * 1024;
+    const blobs = createMockBlobs(5, blobChunkSize); // 20MB
+
+    mockFetch.mockImplementation(() => {
+      return Promise.resolve(createMockBlobResponse(blobChunkSize));
+    });
+
+    await streamToNotion("upload-123", blobs, "application/pdf", false);
+
+    // All 5 blobs should be fetched
+    expect(mockFetch).toHaveBeenCalledTimes(5);
+
+    // Combined buffer should be 20MB
+    const [, buffer] = (sendFileData as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(buffer.length).toBe(5 * blobChunkSize);
   });
 });

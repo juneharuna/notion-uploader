@@ -71,6 +71,22 @@ describe("lib/notion", () => {
         createFileUpload("test.pdf", "application/pdf")
       ).rejects.toThrow("Failed to create file upload: Unauthorized");
     });
+
+    it("should throw on 200 with error body", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          object: "error",
+          status: 400,
+          code: "validation_error",
+          message: "Unsupported file extension",
+        }),
+      });
+
+      await expect(
+        createFileUpload("test.zip", "application/zip")
+      ).rejects.toThrow("Notion API error: validation_error - Unsupported file extension");
+    });
   });
 
   describe("sendFileData", () => {
@@ -121,6 +137,22 @@ describe("lib/notion", () => {
       await expect(
         sendFileData("upload-123", buffer, "application/octet-stream")
       ).rejects.toThrow("Failed to send file data: Upload failed");
+    });
+
+    it("should throw on 200 with error body", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          object: "error",
+          code: "internal_server_error",
+          message: "Internal error",
+        }),
+      });
+
+      const buffer = Buffer.from("test data");
+      await expect(
+        sendFileData("upload-123", buffer, "application/octet-stream")
+      ).rejects.toThrow("Notion API error: internal_server_error - Internal error");
     });
   });
 

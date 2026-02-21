@@ -148,6 +148,7 @@ export default function FileDropzone() {
       completeFormData.append("contentType", contentType);
       completeFormData.append("totalChunks", String(totalChunks));
       completeFormData.append("useMultiPart", String(useMultiPart));
+      completeFormData.append("fileSize", String(file.size));
 
       // SSE: no retry on this call (streaming response)
       const completeRes = await fetch("/api/upload/complete", {
@@ -255,19 +256,39 @@ export default function FileDropzone() {
 
     const startIndex = files.length;
 
-    for (let i = 0; i < newFiles.length; i++) {
-      if (newFiles[i].status === "error") continue;
+    // Upload up to 2 files in parallel using sliding window
+    const FILE_CONCURRENCY = 2;
+    const uploadableIndices = newFiles
+      .map((f, i) => ({ file: f, index: startIndex + i }))
+      .filter(({ file }) => file.status !== "error");
 
-      const fileIndex = startIndex + i;
+    await new Promise<void>((resolve) => {
+      let nextIdx = 0;
+      let activeCount = 0;
 
-      setFiles((prev) =>
-        prev.map((f, idx) =>
-          idx === fileIndex ? { ...f, status: "uploading" } : f
-        )
-      );
+      function startNext() {
+        while (activeCount < FILE_CONCURRENCY && nextIdx < uploadableIndices.length) {
+          const { file, index } = uploadableIndices[nextIdx++];
+          activeCount++;
+          setFiles((prev) =>
+            prev.map((f, idx) =>
+              idx === index ? { ...f, status: "uploading" } : f
+            )
+          );
+          uploadFileWithChunking(file.file, index).finally(() => {
+            activeCount--;
+            if (nextIdx < uploadableIndices.length) {
+              startNext();
+            } else if (activeCount === 0) {
+              resolve();
+            }
+          });
+        }
+      }
 
-      await uploadFileWithChunking(newFiles[i].file, fileIndex);
-    }
+      if (uploadableIndices.length === 0) resolve();
+      else startNext();
+    });
 
     setIsUploading(false);
   };

@@ -3,6 +3,7 @@ export interface RetryOptions {
   baseDelayMs: number;
   maxDelayMs: number;
   retryableStatuses: number[];
+  timeoutMs?: number;
 }
 
 const DEFAULT_OPTIONS: RetryOptions = {
@@ -45,6 +46,14 @@ function getDelay(
   return Math.min(exponential + jitter, maxDelayMs);
 }
 
+function isRetryableError(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  // Node.js AbortError
+  if (error instanceof Error && error.name === "AbortError") return true;
+  return false;
+}
+
 export async function fetchWithRetry(
   url: string,
   init: RequestInit,
@@ -54,8 +63,20 @@ export async function fetchWithRetry(
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
+    // Set up per-request timeout via AbortController
+    let controller: AbortController | undefined;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    if (opts.timeoutMs) {
+      controller = new AbortController();
+      timeoutId = setTimeout(() => controller!.abort(), opts.timeoutMs);
+    }
+
     try {
-      const response = await fetch(url, init);
+      const fetchInit = controller
+        ? { ...init, signal: controller.signal }
+        : init;
+      const response = await fetch(url, fetchInit);
 
       if (response.ok) {
         return response;
@@ -92,9 +113,9 @@ export async function fetchWithRetry(
 
       await sleep(delay);
     } catch (error) {
-      // Network errors (TypeError: Failed to fetch) are retryable
-      if (error instanceof TypeError) {
-        lastError = error;
+      // Network errors and timeout AbortErrors are retryable
+      if (isRetryableError(error)) {
+        lastError = error as Error;
         if (attempt === opts.maxRetries) {
           throw error;
         }
@@ -105,6 +126,8 @@ export async function fetchWithRetry(
 
       // Re-throw non-network errors (including our own "Request failed" error)
       throw error;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
     }
   }
 

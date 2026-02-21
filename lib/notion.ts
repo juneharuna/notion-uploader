@@ -66,14 +66,18 @@ export async function createFileUpload(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-  });
+  }, { timeoutMs: 30_000 });
 
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`Failed to create file upload: ${error}`);
   }
 
-  return response.json();
+  const result = await response.json();
+  if (result.object === "error") {
+    throw new Error(`Notion API error: ${result.code} - ${result.message}`);
+  }
+  return result;
 }
 
 // Send file data (single or part) - accepts Buffer for server-side use
@@ -97,14 +101,18 @@ export async function sendFileData(
     method: "POST",
     headers: getHeaders(),
     body: formData,
-  }, { maxRetries: 5 });
+  }, { maxRetries: 5, timeoutMs: 120_000 });
 
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`Failed to send file data: ${error}`);
   }
 
-  return response.json();
+  const result = await response.json();
+  if (result.object === "error") {
+    throw new Error(`Notion API error: ${result.code} - ${result.message}`);
+  }
+  return result;
 }
 
 // Complete multi-part upload
@@ -116,7 +124,8 @@ export async function completeMultiPartUpload(
     {
       method: "POST",
       headers: getHeaders(),
-    }
+    },
+    { timeoutMs: 30_000 }
   );
 
   if (!response.ok) {
@@ -124,7 +133,11 @@ export async function completeMultiPartUpload(
     throw new Error(`Failed to complete upload: ${error}`);
   }
 
-  return response.json();
+  const result = await response.json();
+  if (result.object === "error") {
+    throw new Error(`Notion API error: ${result.code} - ${result.message}`);
+  }
+  return result;
 }
 
 // Attach file to Notion page
@@ -164,7 +177,8 @@ export async function attachFileToPage(
           },
         ],
       }),
-    }
+    },
+    { timeoutMs: 30_000 }
   );
 
   if (!response.ok) {
