@@ -360,7 +360,7 @@ export default function FileDropzone() {
               파일을 드래그하거나 클릭하여 선택
             </Text>
             <Text size="sm" c="dimmed" inline mt={7}>
-              파일 크기 제한: 5GB (Notion 유료 플랜)
+              파일 크기 제한: 5GB
             </Text>
           </div>
         </Group>
