@@ -38,13 +38,6 @@ function getNotionPageId(): string {
 function getHeaders() {
   return {
     Authorization: `Bearer ${getNotionApiKey()}`,
-    "Notion-Version": "2022-06-28",
-  };
-}
-
-function getFileUploadHeaders() {
-  return {
-    Authorization: `Bearer ${getNotionApiKey()}`,
     "Notion-Version": "2025-09-03",
   };
 }
@@ -69,7 +62,7 @@ export async function createFileUpload(
   const response = await fetchWithRetry(`${NOTION_API_BASE}/file_uploads`, {
     method: "POST",
     headers: {
-      ...getFileUploadHeaders(),
+      ...getHeaders(),
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
@@ -102,7 +95,7 @@ export async function sendFileData(
 
   const response = await fetchWithRetry(url, {
     method: "POST",
-    headers: getFileUploadHeaders(),
+    headers: getHeaders(),
     body: formData,
   }, { maxRetries: 5 });
 
@@ -122,7 +115,7 @@ export async function completeMultiPartUpload(
     `${NOTION_API_BASE}/file_uploads/${uploadId}/complete`,
     {
       method: "POST",
-      headers: getFileUploadHeaders(),
+      headers: getHeaders(),
     }
   );
 
@@ -146,7 +139,7 @@ export async function attachFileToPage(
     {
       method: "PATCH",
       headers: {
-        ...getFileUploadHeaders(),
+        ...getHeaders(),
         "Content-Type": "application/json",
       },
       body: JSON.stringify({

@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
     console.error("Init upload error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "업로드 초기화 실패" },
-      { status: 500 }
+      { status: 422 }
     );
   }
 }

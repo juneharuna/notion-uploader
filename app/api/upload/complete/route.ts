@@ -139,7 +139,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "업로드 완료 실패" },
-      { status: 500 }
+      { status: 422 }
     );
   }
 }

@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
     console.error("Chunk upload error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "청크 업로드 실패" },
-      { status: 500 }
+      { status: 422 }
     );
   }
 }

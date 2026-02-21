@@ -64,8 +64,14 @@ export async function clientFetchWithRetry(
       }
 
       if (attempt === opts.maxRetries) {
+        let body = "";
+        try {
+          body = await response.text();
+        } catch {
+          // ignore body read errors
+        }
         throw new Error(
-          `Request failed after ${opts.maxRetries} retries: ${response.status}`
+          `Request failed after ${opts.maxRetries} retries (${response.status}): ${body || "no response body"}`
         );
       }
 
