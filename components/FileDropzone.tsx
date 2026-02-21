@@ -19,6 +19,25 @@ import { uploadChunksParallel } from "@/lib/upload-pool";
 // 4MB chunk size to stay under Vercel's 4.5MB limit (free tier)
 const CHUNK_SIZE = 4 * 1024 * 1024;
 
+// Notion File Upload API supported extensions
+const SUPPORTED_EXTENSIONS = new Set([
+  // Image
+  ".gif", ".heic", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp", ".ico",
+  // Document
+  ".pdf", ".txt", ".json", ".doc", ".dot", ".docx", ".dotx",
+  ".xls", ".xlt", ".xla", ".xlsx", ".xltx",
+  ".ppt", ".pot", ".pps", ".ppa", ".pptx", ".potx",
+  // Audio
+  ".aac", ".adts", ".mid", ".midi", ".mp3", ".mpga", ".m4a", ".m4b", ".oga", ".ogg", ".wav", ".wma",
+  // Video
+  ".amv", ".asf", ".wmv", ".avi", ".f4v", ".flv", ".gifv", ".m4v", ".mp4", ".mkv", ".webm", ".mov", ".qt", ".mpeg",
+]);
+
+function isSupportedExtension(filename: string): boolean {
+  const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
+  return SUPPORTED_EXTENSIONS.has(ext);
+}
+
 interface FileWithProgress {
   file: FileWithPath;
   progress: number;
@@ -209,18 +228,36 @@ export default function FileDropzone() {
   };
 
   const handleDrop = async (acceptedFiles: FileWithPath[]) => {
-    const newFiles: FileWithProgress[] = acceptedFiles.map((file) => ({
-      file,
-      progress: 0,
-      status: "pending" as const,
-    }));
+    // Validate file extensions before starting upload
+    const newFiles: FileWithProgress[] = acceptedFiles.map((file) => {
+      if (!isSupportedExtension(file.name)) {
+        const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+        return {
+          file,
+          progress: 0,
+          status: "error" as const,
+          error: `지원되지 않는 파일 형식입니다 (${ext}). 이미지, 문서, 오디오, 비디오 파일만 업로드할 수 있습니다.`,
+        };
+      }
+      return {
+        file,
+        progress: 0,
+        status: "pending" as const,
+      };
+    });
 
     setFiles((prev) => [...prev, ...newFiles]);
+
+    const uploadableFiles = newFiles.filter((f) => f.status === "pending");
+    if (uploadableFiles.length === 0) return;
+
     setIsUploading(true);
 
     const startIndex = files.length;
 
     for (let i = 0; i < newFiles.length; i++) {
+      if (newFiles[i].status === "error") continue;
+
       const fileIndex = startIndex + i;
 
       setFiles((prev) =>
