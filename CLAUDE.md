@@ -8,7 +8,7 @@ Next.js 16 (App Router) + Mantine UI, Vercel 배포, Vercel Blob (임시 저장�
 - `Notion-Version: 2025-09-03` 헤더 필수
 - 파트 크기: 10MB 권장 (5~20MB), 20MB 이하 파일은 single-part 모드
 - ⚠️ ZIP/RAR/7z 등 압축 파일은 Notion이 지원하지 않음
-- 지원 확장자 목록: `components/FileDropzone.tsx`의 `SUPPORTED_EXTENSIONS`
+- 지원 확장자 목록: `lib/validation.ts`의 `SUPPORTED_EXTENSIONS`
 
 ## 업로드 아키텍처
 
@@ -27,6 +27,25 @@ Next.js 16 (App Router) + Mantine UI, Vercel 배포, Vercel Blob (임시 저장�
 - 재시도 계층: 서버 `lib/retry.ts` (Notion API) + 클라이언트 `lib/client-retry.ts` (Vercel API)
 - 둘 다 exponential backoff + jitter + AbortController 타임아웃
 
+## 프로젝트 구조
+
+### 클라이언트
+- `components/FileDropzone.tsx` — 프레젠테이션 (드롭존 UI + 진행률 표시)
+- `hooks/useFileUpload.ts` — 업로드 오케스트레이션 (청킹, SSE 소비, 에러 처리)
+- `components/icons.tsx` — SVG 아이콘 (UploadIcon, XIcon, FileIcon)
+
+### 서버
+- `lib/auth.ts` — `requireAuth()` 인증 미들웨어 (모든 API 라우트에서 사용)
+- `lib/notion.ts` — Notion API 래퍼 (create, send, complete, attach)
+- `lib/stream-rechunker.ts` — Blob 청크 → Notion 파트 크기로 재분할 스트리밍
+- `lib/upload-pool.ts` — 동시성 제한 청크 업로드 풀
+
+### 공유
+- `lib/retry.ts` — 서버 재시도 (단일 구현)
+- `lib/client-retry.ts` — 클라이언트용 re-export (`clientFetchWithRetry`)
+- `lib/format.ts` — `formatFileSize` UI 유틸
+- `lib/validation.ts` — `SUPPORTED_EXTENSIONS`, `isSupportedExtension`
+
 ## 테스트
-- `__tests__/lib/` — notion, retry, client-retry, stream-rechunker, upload-pool
+- `__tests__/lib/` — notion, retry, client-retry, stream-rechunker, upload-pool, format
 - `npm run test`
