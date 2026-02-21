@@ -1,4 +1,5 @@
 import { sendFileData, completeMultiPartUpload } from "./notion";
+import { fetchWithRetry } from "./retry";
 
 const NOTION_CHUNK_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -42,7 +43,7 @@ async function streamSinglePart(
   const chunks: Buffer[] = [];
 
   for (const blob of sortedBlobs) {
-    const response = await fetch(blob.url);
+    const response = await fetchWithRetry(blob.url, { method: "GET" });
     const arrayBuffer = await response.arrayBuffer();
     chunks.push(Buffer.from(arrayBuffer));
   }
@@ -57,12 +58,6 @@ async function streamMultiPart(
   contentType: string,
   onPartSent?: (partNumber: number, totalParts: number) => void
 ): Promise<void> {
-  // Calculate total size for estimating total parts
-  let totalBlobSize = 0;
-  const blobBuffers: Buffer[] = [];
-
-  // First pass: fetch all blob sizes to calculate total parts
-  // We fetch blobs one at a time to keep memory low
   let buffer = Buffer.alloc(0);
   let partNumber = 1;
 
@@ -71,7 +66,7 @@ async function streamMultiPart(
   let processedSize = 0;
 
   for (const blob of sortedBlobs) {
-    const response = await fetch(blob.url);
+    const response = await fetchWithRetry(blob.url, { method: "GET" });
     const arrayBuffer = await response.arrayBuffer();
     const chunk = Buffer.from(arrayBuffer);
     processedSize += chunk.length;

@@ -146,7 +146,7 @@ export async function attachFileToPage(
     {
       method: "PATCH",
       headers: {
-        ...getHeaders(),
+        ...getFileUploadHeaders(),
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
